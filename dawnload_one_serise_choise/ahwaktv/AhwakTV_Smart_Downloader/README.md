@@ -11,7 +11,7 @@
 ---
 
 ## 📌 Overview
-
+![Screenshot From 2026-11-15 22-20-13.png](../../../../../../../../../home/mostafa_emad/Pictures/Screenshots/Screenshot%20From%202026-11-15%2022-20-13.png)
 **AhwakTV Smart Downloader** is an enterprise-grade automated extraction, decryption, and media stream acquisition engine engineered to handle complex video-on-demand (VOD) catalogs across multi-season TV series.
 
 Rather than relying on naive web scraping or fragile single-thread downloads, this system is architected as an **asynchronous, multi-worker parallel pipeline** designed to overcome modern streaming defenses: **TLS fingerprinting (JA3/JA4)**, **heavily obfuscated JavaScript players (Dean Edwards packer)**, **dynamic multi-server CDN failovers**, and **OS-level subprocess pipe deadlocks**.
