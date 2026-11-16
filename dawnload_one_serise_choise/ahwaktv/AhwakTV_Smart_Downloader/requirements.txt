@@ -1,0 +1,10 @@
+# Core dependencies for Unified Smart Series Downloader
+curl_cffi>=0.7.0
+beautifulsoup4>=4.12.0
+jsbeautifier>=1.14.0
+rich>=13.0.0
+psutil>=5.9.0
+
+# System Requirements (External binaries, install via your package manager):
+# - ffmpeg
+# - ffprobe

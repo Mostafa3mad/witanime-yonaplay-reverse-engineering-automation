@@ -1,0 +1,60 @@
+{
+  "paths": {
+    "output_dir": "Downloaded_Series",
+    "data_dir": "data",
+    "logs_dir": "logs",
+    "series_file": "series.txt"
+  },
+  "downloads": {
+    "min_workers": 2,
+    "initial_workers": 5,
+    "max_workers": 15,
+    "adaptive_enabled": true,
+    "scale_up_threshold": 0.8,
+    "scale_down_threshold": 0.3,
+    "monitoring_interval": 5,
+    "max_retries": 3,
+    "retry_backoff_factor": 2.0,
+    "retry_jitter": 1.0,
+    "timeout": 30,
+    "ffmpeg_timeout": 10800,
+    "resume": true,
+    "validate_videos": true,
+    "min_disk_free_mb": 1000
+  },
+  "extractor": {
+    "request_timeout": 30,
+    "impersonate": "chrome"
+  },
+  "servers": {
+    "enabled": [
+      "1vid",
+      "vidspeed"
+    ],
+    "priority": [
+      "1vid",
+      "vidspeed"
+    ]
+  },
+  "network": {
+    "cookies": {
+      "PHPSESSID": "YOUR_PHPSESSID",
+      "watched_video_list": "MTQ4MDU5",
+      "pm_elastic_player": "normal"
+    },
+    "headers": {
+      "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      "Accept-Language": "ar,en-US;q=0.9,en;q=0.8"
+    }
+  },
+  "monitoring": {
+    "enabled": true,
+    "dashboard": true,
+    "refresh_rate_hz": 4
+  },
+  "state": {
+    "auto_backup": true,
+    "backup_interval": 10,
+    "max_backups": 10
+  }
+}

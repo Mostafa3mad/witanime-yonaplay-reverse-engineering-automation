@@ -1,0 +1,10 @@
+# ==============================================================================
+# Unified Smart Series Downloader - Series URL List
+# ==============================================================================
+# Add series URLs below, one per line.
+# Lines starting with '#' or empty lines will be ignored automatically.
+# Duplicate URLs will be automatically filtered out.
+# ==============================================================================
+
+# Example:
+# https://yam.ahwaktv.net/view-serie.php?name=%D9%85%D9%88%D8%B6%D9%88%D8%B9-%D8%B9%D8%A7%D8%A6%D9%84%D9%8A
