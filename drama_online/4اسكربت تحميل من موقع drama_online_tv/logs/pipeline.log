@@ -1,0 +1,8 @@
+2026-11-17 22:44:41 | INFO    | --- Starting Step 1: Sitemap ---
+2026-11-17 22:44:41 | INFO    | Loaded 2562 series from existing sitemap.json
+2026-11-17 22:44:41 | INFO    | --- Starting Step 2: Series & Episodes ---
+2026-11-17 22:44:50 | INFO    | Downloaded banner for Blossom through the Cloud: banner.jpg
+2026-11-17 22:44:50 | INFO    | Saved series info: Blossom through the Cloud / تزهر بين الغيوم (10 episodes) in Blossom through the Cloud
+2026-11-17 22:44:50 | INFO    | Step 2 Complete: 1 new folders processed
+2026-11-17 22:44:50 | INFO    | --- Starting Step 3: Embed Servers ---
+2026-11-17 22:46:12 | INFO    | Step 3 Complete: All servers extracted
