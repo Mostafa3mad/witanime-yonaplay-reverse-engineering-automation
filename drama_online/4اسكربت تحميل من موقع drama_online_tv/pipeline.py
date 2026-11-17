@@ -1,7 +1,7 @@
 """
 ================================================================================
-  Drama Online Master Pipeline - نظام التحميل الشامل لموقع دراما أونلاين
-  المسار الكامل: Sitemap -> تفاصيل المسلسل -> البانر -> الحلقات -> السيرفرات
+  Drama Online Master Pipeline - Automated Media & Server Ingestion System
+  Full Pipeline: Sitemap -> Series Details -> Banner -> Episodes -> Embed Servers
 ================================================================================
 """
 
@@ -17,6 +17,14 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin
 
+# Ensure standard UTF-8 console output on Windows
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 try:
     from curl_cffi import requests
 except ImportError:
@@ -26,6 +34,7 @@ from bs4 import BeautifulSoup
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich import box
 from rich.progress import (
     Progress,
     SpinnerColumn,
@@ -37,7 +46,7 @@ from rich.progress import (
 )
 
 # ==============================================================================
-# المسارات والإعدادات الأساسية
+# Paths & Global Configurations
 # ==============================================================================
 CURRENT_DIR = Path(__file__).resolve().parent
 SERIES_DOWNLOAD_DIR = CURRENT_DIR / "series_download"
@@ -64,32 +73,32 @@ DEFAULT_SERIES_WORKERS = 3
 DEFAULT_SERVER_WORKERS = 6
 MAX_RETRIES = 4
 
-console = Console()
+console = Console(highlight=False, safe_box=True)
 
-# تهيئة نظام السجلات
+# Initialize logging system
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     filename=LOG_FILE,
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-7s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    encoding="utf-8"
+    encoding="utf-8",
 )
 logger = logging.getLogger("drama_pipeline")
 
 
 # ==============================================================================
-# دوال مساعدة عامة (Utilities)
+# General Utilities
 # ==============================================================================
 def sanitize_filename(name: str) -> str:
-    """تنظيف أسماء المجلدات من الحروف الممنوعة في أنظمة الملفات."""
+    """Sanitize directory and file names across all operating systems."""
     clean = re.sub(r'[\\/*?:"<>|]', "", name).strip().rstrip(".")
     clean = re.sub(r"\s+", " ", clean)
     return clean or "Unnamed_Series"
 
 
 def clean_image_url(url: str) -> str:
-    """تنظيف وتوليد الرابط الكامل والمباشر للصورة."""
+    """Extract clean, high-resolution original image URL from relative or doubled paths."""
     if not url:
         return ""
     url = url.strip()
@@ -114,22 +123,22 @@ def clean_image_url(url: str) -> str:
 
 
 def clean_embed_url(url: str) -> str:
-    """تنظيف وتجهيز روابط الفيديو والتضمين لتشغيل مباشر."""
+    """Normalize video embed URLs for direct playback (Google Drive, Mega, etc.)."""
     if not url:
         return ""
     url = url.strip()
 
-    # إزالة أي علامات هاش زائدة بعد البروتوكول
+    # Strip stray hashes
     url = re.sub(r"^https?://#+", "https://", url)
 
-    # تحويل روابط Mega لصيغة embed
+    # Convert Mega file links to direct embed format
     if "mega.nz" in url or "mega.io" in url:
         if "/file/" in url:
             url = url.replace("/file/", "/embed/")
         elif "/embed/" not in url:
             url = url.replace("mega.nz/", "mega.nz/embed/").replace("mega.io/", "mega.io/embed/")
 
-    # تحويل روابط Google Drive لصيغة preview
+    # Convert Google Drive view links to direct preview format
     if "drive.google.com" in url and "/preview" not in url:
         url = re.sub(r"/view.*$", "/preview", url)
         url = re.sub(r"/edit.*$", "/preview", url)
@@ -141,7 +150,7 @@ def clean_embed_url(url: str) -> str:
 
 
 def download_banner(image_url: str, output_folder: Path) -> str:
-    """تحميل وحفظ صورة البوستر كـ banner.jpg داخل مجلد المسلسل."""
+    """Download cover poster art locally as banner.jpg inside series directory."""
     if not image_url:
         return ""
 
@@ -156,7 +165,7 @@ def download_banner(image_url: str, output_folder: Path) -> str:
         banner_filename = f"banner{ext}"
         dest_path = output_folder / banner_filename
 
-        # إذا كانت الصورة محملة محلياً مسبقاً
+        # If already cached and valid size
         if dest_path.exists() and dest_path.stat().st_size > 1000:
             return banner_filename
 
@@ -178,7 +187,7 @@ def download_banner(image_url: str, output_folder: Path) -> str:
 
 
 # ==============================================================================
-# المرحلة 1: خريطة الموقع (Sitemap Extraction)
+# Stage 1: Sitemap Catalog Extraction
 # ==============================================================================
 def parse_sitemap_cards(html_text: str) -> list[dict]:
     soup = BeautifulSoup(html_text, "html.parser")
@@ -216,17 +225,17 @@ def fetch_sitemap_page(page: int) -> tuple[int, list[dict]]:
 
 
 def step_1_sitemap(force: bool = False, workers: int = 10) -> list[dict]:
-    console.print(Panel("[bold cyan]المرحلة 1: فحص واستخراج خريطة مسلسلات الموقع (Sitemap)[/bold cyan]", border_style="cyan"))
+    console.print(Panel("[bold cyan]Stage 1: Catalog Discovery & Sitemap Verification[/bold cyan]", border_style="cyan", box=box.ROUNDED))
     logger.info("--- Starting Step 1: Sitemap ---")
 
     if SITEMAP_FILE.exists() and not force:
         with open(SITEMAP_FILE, "r", encoding="utf-8") as f:
             all_series = json.load(f)
-        console.print(f"[green]✓ تم العثور على sitemap.json جاهز يحتوي على [bold]{len(all_series)}[/bold] مسلسل.[/green]\n")
+        console.print(f"[green]✓ Found local sitemap.json with [bold]{len(all_series)}[/bold] series ready.[/green]\n")
         logger.info(f"Loaded {len(all_series)} series from existing sitemap.json")
         return all_series
 
-    # تحديد عدد الصفحات من الصفحة الأولى
+    # Auto-detect total pages from page 1
     total_pages = 125
     try:
         r1 = requests.get(FIRST_PAGE_URL, headers=DEFAULT_HEADERS, impersonate="chrome", timeout=20)
@@ -237,7 +246,7 @@ def step_1_sitemap(force: bool = False, workers: int = 10) -> list[dict]:
     except Exception as e:
         logger.warning(f"Failed to auto-detect total pages: {e}")
 
-    console.print(f"[*] جاري سحب [bold]{total_pages}[/bold] صفحة من قائمة الدراما...")
+    console.print(f"[*] Scraping [bold]{total_pages}[/bold] catalog pages from site...")
 
     pages_data = {}
     pending = list(range(1, total_pages + 1))
@@ -245,7 +254,7 @@ def step_1_sitemap(force: bool = False, workers: int = 10) -> list[dict]:
 
     while pending and round_n <= 3:
         current_workers = workers if round_n == 1 else 4
-        desc = "سحب صفحات الدراما" if round_n == 1 else f"إعادة محاولة الصفحات المفقودة (جولة {round_n})"
+        desc = "Scraping catalog pages" if round_n == 1 else f"Retrying missing pages (Round {round_n})"
 
         with Progress(
             SpinnerColumn(),
@@ -279,13 +288,13 @@ def step_1_sitemap(force: bool = False, workers: int = 10) -> list[dict]:
     with open(SITEMAP_FILE, "w", encoding="utf-8") as f:
         json.dump(all_series, f, ensure_ascii=False, indent=2)
 
-    console.print(f"[bold green]✓ اكتملت المرحلة 1: تم حفظ {len(all_series)} مسلسل في sitemap.json[/bold green]\n")
+    console.print(f"[bold green]✓ Stage 1 Complete: Saved {len(all_series)} series to sitemap.json[/bold green]\n")
     logger.info(f"Step 1 Complete: {len(all_series)} series saved to sitemap.json")
     return all_series
 
 
 # ==============================================================================
-# المرحلة 2: تفاصيل المسلسل، البانر، والحلقات (Series, Banner & Episodes)
+# Stage 2: Series Metadata, Banners & Episodes
 # ==============================================================================
 def parse_episodes_from_html(html_snippet: str) -> list[dict]:
     soup = BeautifulSoup(html_snippet, "html.parser")
@@ -321,7 +330,7 @@ def parse_episodes_from_html(html_snippet: str) -> list[dict]:
 
         episodes.append({
             "episode_number": ep_num,
-            "title": title or (f"الحلقة {ep_num}" if ep_num else "حلقة"),
+            "title": title or (f"Episode {ep_num}" if ep_num else "Episode"),
             "url": href.strip(),
             "date": date_str,
             "thumbnail": thumb_url
@@ -421,11 +430,12 @@ def parse_series_metadata(soup: BeautifulSoup, default_url: str = "") -> dict:
         "declared_episodes": metadata.get("الحلقات") or metadata.get("Episodes"),
         "poster": poster_url,
         "banner": banner_to_use,
-        "metadata_extra": metadata
+        "metadata_extra": metadata,
     }
 
 
 def fetch_more_episodes_ajax(drama_id: str, season: str = "1", start_page: int = 2, referer_url: str = BASE_URL, max_retries: int = 4) -> list[dict]:
+    """Fetch all remaining episodes via WordPress admin-ajax endpoint."""
     all_extra_episodes = []
     current_page = start_page
     headers = {
@@ -473,8 +483,8 @@ def fetch_more_episodes_ajax(drama_id: str, season: str = "1", start_page: int =
 
 
 def process_single_series_episodes(series_url: str, force: bool = False) -> Path:
-    """استخراج تفاصيل مسلسل وتحميل البانر وتجهيز info.json مع دعم الاستئناف."""
-    # البحث إذا كان المسلسل موجود مسبقاً
+    """Extract series details, download poster, and generate info.json with resume capability."""
+    # Check if series is already processed
     for existing_folder in SERIES_DOWNLOAD_DIR.iterdir():
         if existing_folder.is_dir():
             info_f = existing_folder / "info.json"
@@ -577,12 +587,12 @@ def process_single_series_episodes(series_url: str, force: bool = False) -> Path
 
 
 def step_2_series_and_episodes(series_list: list[dict], workers: int = DEFAULT_SERIES_WORKERS) -> list[Path]:
-    console.print(Panel("[bold magenta]المرحلة 2: تجهيز مجلدات المسلسلات، تحميل البانر، واستخراج الحلقات[/bold magenta]", border_style="magenta"))
+    console.print(Panel("[bold magenta]Stage 2: Series Metadata, Cover Art & Episodes Harvesting[/bold magenta]", border_style="magenta", box=box.ROUNDED))
     logger.info("--- Starting Step 2: Series & Episodes ---")
 
     SERIES_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-    # فحص المسلسلات المكتملة مسبقاً لدعم الاستئناف
+    # Check for already completed series to support instant resume
     pending_items = []
     already_done = 0
 
@@ -604,10 +614,10 @@ def step_2_series_and_episodes(series_list: list[dict], workers: int = DEFAULT_S
 
         pending_items.append(item)
 
-    console.print(f"إجمالي المسلسلات: [bold]{len(series_list)}[/bold] | مكتمل مسبقاً: [bold green]{already_done}[/bold green] | متبقي للمعالجة: [bold yellow]{len(pending_items)}[/bold yellow]")
+    console.print(f"Total Series: [bold]{len(series_list)}[/bold] | Already Cached: [bold green]{already_done}[/bold green] | Pending: [bold yellow]{len(pending_items)}[/bold yellow]")
 
     if not pending_items:
-        console.print("[green]✓ كافة المسلسلات مكتملة الحلقات والبانرات بالفعل. تخطي المرحلة 2.[/green]\n")
+        console.print("[green]✓ All series metadata, banners, and episodes are already completed. Skipping Stage 2.[/green]\n")
         return [f for f in SERIES_DOWNLOAD_DIR.iterdir() if f.is_dir() and (f / "info.json").exists()]
 
     completed_folders = []
@@ -621,7 +631,7 @@ def step_2_series_and_episodes(series_list: list[dict], workers: int = DEFAULT_S
         TextColumn("[cyan]{task.fields[current]}"),
         console=console
     ) as progress:
-        task = progress.add_task("تجهيز بيانات المسلسلات...", total=len(pending_items), current="")
+        task = progress.add_task("Harvesting series data...", total=len(pending_items), current="")
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(process_single_series_episodes, it["url"]): it
@@ -634,14 +644,14 @@ def step_2_series_and_episodes(series_list: list[dict], workers: int = DEFAULT_S
                     progress.update(task, current=f"{folder.name[:25]}")
                 progress.advance(task)
 
-    console.print(f"[bold green]✓ اكتملت المرحلة 2: تم تجهيز {len(completed_folders)} مجلد مسلسلات جديد.[/bold green]\n")
+    console.print(f"[bold green]✓ Stage 2 Complete: Processed {len(completed_folders)} new series folders.[/bold green]\n")
     logger.info(f"Step 2 Complete: {len(completed_folders)} new folders processed")
 
     return [f for f in SERIES_DOWNLOAD_DIR.iterdir() if f.is_dir() and (f / "info.json").exists()]
 
 
 # ==============================================================================
-# المرحلة 3: استخراج سيرفرات المشاهدة (Video Embed Servers Extraction)
+# Stage 3: Video Embed Extraction & Decryption
 # ==============================================================================
 def parse_episode_servers_page(html_content: str):
     soup = BeautifulSoup(html_content, "html.parser")
@@ -792,11 +802,11 @@ def process_series_servers(series_folder: Path, server_workers: int = DEFAULT_SE
             ep["servers"] = servers
             updated_count += 1
 
-            # حفظ بعد كل حلقة مباشرة
+            # Atomic save: persist state immediately after each episode
             with open(info_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
-            time.sleep(0.8)  # مهلة لتفادي حظر Rate Limit
+            time.sleep(0.8)  # Polite delay to avoid Cloudflare rate limiting
 
         return series_folder, updated_count
     except Exception as e:
@@ -805,7 +815,7 @@ def process_series_servers(series_folder: Path, server_workers: int = DEFAULT_SE
 
 
 def step_3_servers(folders: list[Path], workers: int = 2, server_workers: int = DEFAULT_SERVER_WORKERS):
-    console.print(Panel("[bold green]المرحلة 3: استخراج سيرفرات المشاهدة لجميع الحلقات[/bold green]", border_style="green"))
+    console.print(Panel("[bold green]Stage 3: Video Embed Extraction & Decryption[/bold green]", border_style="green", box=box.ROUNDED))
     logger.info("--- Starting Step 3: Embed Servers ---")
 
     pending_folders = []
@@ -822,10 +832,10 @@ def step_3_servers(folders: list[Path], workers: int = 2, server_workers: int = 
         except Exception:
             pending_folders.append(f)
 
-    console.print(f"إجمالي المجلدات: [bold]{len(folders)}[/bold] | مكتملة السيرفرات: [bold green]{len(folders) - len(pending_folders)}[/bold green] | متبقية: [bold yellow]{len(pending_folders)}[/bold yellow]")
+    console.print(f"Total Folders: [bold]{len(folders)}[/bold] | Fully Resolved: [bold green]{len(folders) - len(pending_folders)}[/bold green] | Pending Resolution: [bold yellow]{len(pending_folders)}[/bold yellow]")
 
     if not pending_folders:
-        console.print("[green]✓ جميع الحلقات تحتوي على سيرفرات المشاهدة بالفعل. اكتملت المرحلة 3.[/green]\n")
+        console.print("[green]✓ All episodes already have streaming servers resolved. Stage 3 complete.[/green]\n")
         return
 
     with Progress(
@@ -838,7 +848,7 @@ def step_3_servers(folders: list[Path], workers: int = 2, server_workers: int = 
         TextColumn("[cyan]{task.fields[current]}"),
         console=console
     ) as progress:
-        task = progress.add_task("سحب سيرفرات الحلقات...", total=len(pending_folders), current="")
+        task = progress.add_task("Extracting episode servers...", total=len(pending_folders), current="")
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(process_series_servers, folder, server_workers): folder
@@ -849,12 +859,12 @@ def step_3_servers(folders: list[Path], workers: int = 2, server_workers: int = 
                 progress.update(task, current=f"{folder.name[:20]} (+{updated} eps)")
                 progress.advance(task)
 
-    console.print("[bold green]✓ اكتملت المرحلة 3: تم استخراج وتحديث جميع سيرفرات الحلقات بنجاح.[/bold green]\n")
+    console.print("[bold green]✓ Stage 3 Complete: All episode embed servers extracted and verified successfully.[/bold green]\n")
     logger.info("Step 3 Complete: All servers extracted")
 
 
 # ==============================================================================
-# ملخص وإحصائيات العمل النهائي (Final Summary)
+# Final Reporting & Execution Summary
 # ==============================================================================
 def display_summary(start_time: float):
     elapsed = time.time() - start_time
@@ -875,67 +885,65 @@ def display_summary(start_time: float):
         except Exception:
             pass
 
-    table = Table(title="[bold green]📊 ملخص تقرير التحميل الشامل (Pipeline Summary)[/bold green]", border_style="bright_blue")
-    table.add_column("المعيار", style="bold cyan", width=30)
-    table.add_column("القيمة", style="bold yellow", width=30)
+    table = Table(title="[bold green]📊 Pipeline Execution Summary[/bold green]", border_style="bright_blue", box=box.ROUNDED)
+    table.add_column("Metric", style="bold cyan", width=32)
+    table.add_column("Value", style="bold yellow", width=32)
 
-    table.add_row("إجمالي المسلسلات المجهزة", str(len(folders)))
-    table.add_row("إجمالي الحلقات المستخرجة", str(total_episodes))
-    table.add_row("إجمالي روابط السيرفرات", str(total_servers))
-    table.add_row("المجلد الرئيسي للمسلسلات", str(SERIES_DOWNLOAD_DIR.name))
-    table.add_row("ملف السجلات (Logs)", str(LOG_FILE.name))
-    table.add_row("إجمالي وقت التشغيل", f"{minutes} دقيقة و {seconds} ثانية")
+    table.add_row("Total Series Processed", str(len(folders)))
+    table.add_row("Total Episodes Fetched", str(total_episodes))
+    table.add_row("Total Embed Server Links", str(total_servers))
+    table.add_row("Storage Workspace", str(SERIES_DOWNLOAD_DIR.name))
+    table.add_row("Operational Log File", str(LOG_FILE.name))
+    table.add_row("Total Elapsed Time", f"{minutes} min {seconds} sec")
 
     console.print(table)
-    console.print(Panel(f"[bold green]✨ اكتملت جميع المراحل بنجاح! المسارات محفوظة وجاهزة للاستخدام في:[/bold green]\n[cyan]{SERIES_DOWNLOAD_DIR}[/cyan]", border_style="green"))
+    console.print(Panel(f"[bold green]✨ All pipeline stages completed successfully! Output stored at:[/bold green]\n[cyan]{SERIES_DOWNLOAD_DIR}[/cyan]", border_style="green", box=box.ROUNDED))
 
 
 # ==============================================================================
-# نقطة الدخول الرئيسية (CLI Execution)
+# Main Entry Point (CLI Execution)
 # ==============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="Drama Online Master Pipeline")
-    parser.add_argument("--all", "-a", action="store_true", help="تشغيل خط الإنتاج بالكامل لكافة مسلسلات sitemap")
-    parser.add_argument("--test", "-t", type=int, nargs="?", const=1, help="تشغيل اختبار على عدد محدد من المسلسلات (افتراضياً 1)")
-    parser.add_argument("--force-sitemap", action="store_true", help="إعادة سحب sitemap.json من الصفر حتى وإن كان موجوداً")
-    parser.add_argument("--skip-servers", action="store_true", help="تخطي مرحلة استخراج السيرفرات والاكتفاء بالبيانات والبوستر والحلقات")
-    parser.add_argument("--series-workers", type=int, default=DEFAULT_SERIES_WORKERS, help="عدد خيوط المعالجة المتزامنة للمسلسلات")
-    parser.add_argument("--server-workers", type=int, default=DEFAULT_SERVER_WORKERS, help="عدد خيوط سحب سيرفرات الحلقة الواحدة")
+    parser = argparse.ArgumentParser(description="Drama Online Master Automation Pipeline")
+    parser.add_argument("--all", "-a", action="store_true", help="Explicitly run full pipeline on all series in catalog")
+    parser.add_argument("--test", "-t", type=int, nargs="?", const=1, help="Run test mode on N series only (e.g. --test 3)")
+    parser.add_argument("--force-sitemap", action="store_true", help="Force fresh web scraping of sitemap.json")
+    parser.add_argument("--skip-servers", action="store_true", help="Extract metadata, posters, and episodes while skipping servers")
+    parser.add_argument("--series-workers", type=int, default=DEFAULT_SERIES_WORKERS, help="Concurrent series workers (Stage 2)")
+    parser.add_argument("--server-workers", type=int, default=DEFAULT_SERVER_WORKERS, help="Concurrent server resolution workers (Stage 3)")
     args = parser.parse_args()
 
     start_time = time.time()
 
     console.print(Panel.fit(
         "[bold green]🚀 Drama Online Full Pipeline Automation[/bold green]\n"
-        "[cyan]نظام الأتمتة الشامل: خريطة الموقع ➔ بيانات المسلسل ➔ البانر ➔ الحلقات ➔ السيرفرات[/cyan]",
-        border_style="bold green"
+        "[cyan]End-to-End Media Pipeline: Catalog -> Metadata -> Banner -> Episodes -> Decrypted Embeds[/cyan]",
+        border_style="bold green",
+        box=box.ROUNDED
     ))
 
-    # المرحلة 1: خريطة الموقع
+    # Stage 1: Sitemap Catalog
     all_series = step_1_sitemap(force=args.force_sitemap)
 
-    # تحديد نطاق العمل (اختبار أو كامل)
+    # Determine execution scope: DEFAULT IS ALL SERIES!
     if args.test:
         target_series = all_series[:args.test]
-        console.print(f"[bold yellow]⚠️ نمط الاختبار مفعل: سيتم تطبيق العمليات على أول {len(target_series)} مسلسل فقط.[/bold yellow]\n")
-    elif args.all:
-        target_series = all_series
+        console.print(f"[bold yellow]⚠️ Test mode active: Processing first {len(target_series)} series only.[/bold yellow]\n")
     else:
-        # التشغيل الافتراضي: اختبار أول مسلسل إذا لم يحدد وسيط لتجنب بدء تحميل 2600 مسلسل بالخطأ
-        console.print("[bold yellow]ℹ️ لم يتم تحديد --all. سيتم إجراء اختبار على أول مسلسل للتأكد من سلامة المراحل.[/bold yellow]")
-        console.print("[yellow]لتشغيل كافة المسلسلات بالكامل: استخدم الأمر مع وسيط: --all[/yellow]\n")
-        target_series = all_series[:1]
+        # Default behavior: Process ALL series from sitemap.json
+        target_series = all_series
+        console.print(f"[bold cyan]>> Production Mode Active: Processing all {len(target_series)} series from catalog.[/bold cyan]\n")
 
-    # المرحلة 2: المسلسلات والبانرات والحلقات
+    # Stage 2: Series Metadata, Banners & Episodes
     ready_folders = step_2_series_and_episodes(target_series, workers=args.series_workers)
 
-    # المرحلة 3: السيرفرات (إذا لم يُطلب تخطيها)
+    # Stage 3: Streaming Servers
     if not args.skip_servers:
         step_3_servers(ready_folders, workers=2, server_workers=args.server_workers)
     else:
-        console.print("[yellow]⚠️ تم تخطي مرحلة استخراج السيرفرات بناءً على طلبك (--skip-servers).[/yellow]\n")
+        console.print("[yellow]⚠️ Server extraction stage skipped per --skip-servers request.[/yellow]\n")
 
-    # الملخص النهائي
+    # Final summary display
     display_summary(start_time)
 
 
