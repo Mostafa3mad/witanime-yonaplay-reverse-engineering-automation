@@ -10,3 +10,28 @@
 2026-11-18 01:55:35 | INFO    | Loaded 2562 series from existing sitemap.json
 2026-11-18 01:55:35 | INFO    | --- Starting Step 2: Series & Episodes ---
 2026-11-18 01:55:35 | INFO    | --- Starting Step 3: Embed Servers ---
+2026-11-18 02:03:55 | INFO    | --- Starting Step 1: Sitemap ---
+2026-11-18 02:03:55 | INFO    | Loaded 2562 series from existing sitemap.json
+2026-11-18 02:03:55 | INFO    | --- Starting Step 2: Series & Episodes ---
+2026-11-18 02:03:55 | INFO    | --- Starting Step 3: Embed Servers ---
+2026-11-18 02:16:12 | INFO    | --- Starting Step 1: Sitemap ---
+2026-11-18 02:16:12 | INFO    | Loaded 2562 series from existing sitemap.json
+2026-11-18 02:16:17 | INFO    | --- Starting Step 1: Sitemap ---
+2026-11-18 02:16:17 | INFO    | Loaded 2562 series from existing sitemap.json
+2026-11-18 02:16:19 | INFO    | Downloaded banner for Take a Hike!: banner.jpg
+2026-11-18 02:17:29 | INFO    | Completed Take a Hike!: 10 eps, 100 servers
+2026-11-18 02:35:35 | INFO    | --- Starting Step 1: Sitemap ---
+2026-11-18 02:35:35 | INFO    | Loaded 2562 series from existing sitemap.json
+2026-11-18 02:35:42 | INFO    | Downloaded banner for Mousetrap: banner.jpg
+2026-11-18 02:37:51 | INFO    | Completed Mousetrap: 10 eps, 100 servers
+2026-11-18 02:38:12 | INFO    | Downloaded banner for Pull Strings: banner.jpg
+2026-11-18 02:38:29 | WARNING | Rate limited (HTTP 429) on https://drama-online.tv/wp-json/drama/v1/watch-url?ep=200096&srv=7. Cooling down for 62s (Attempt 1/3)
+2026-11-18 02:38:30 | WARNING | Rate limited (HTTP 429) on https://drama-online.tv/wp-json/drama/v1/watch-url?ep=200096&srv=8. Cooling down for 62s (Attempt 1/3)
+2026-11-18 02:38:31 | WARNING | Rate limited (HTTP 429) on https://drama-online.tv/wp-json/drama/v1/watch-url?ep=200096&srv=9. Cooling down for 62s (Attempt 1/3)
+2026-11-18 02:38:38 | WARNING | Rate limited (HTTP 429) on https://drama-online.tv/wp-json/drama/v1/watch-url?ep=200096&srv=4. Cooling down for 62s (Attempt 2/3)
+2026-11-18 02:40:23 | WARNING | Rate limited (HTTP 429) on https://drama-online.tv/wp-json/drama/v1/watch-url?ep=200087&srv=8. Cooling down for 32s (Attempt 1/3)
+2026-11-18 02:40:23 | WARNING | Rate limited (HTTP 429) on https://drama-online.tv/wp-json/drama/v1/watch-url?ep=200087&srv=9. Cooling down for 32s (Attempt 1/3)
+2026-11-18 02:40:56 | WARNING | Rate limited (HTTP 429) on https://drama-online.tv/wp-json/drama/v1/watch-url?ep=200087&srv=9. Cooling down for 32s (Attempt 2/3)
+2026-11-18 02:40:57 | WARNING | Rate limited (HTTP 429) on https://drama-online.tv/wp-json/drama/v1/watch-url?ep=200087&srv=8. Cooling down for 32s (Attempt 2/3)
+2026-11-18 03:06:00 | INFO    | --- Starting Step 1: Sitemap ---
+2026-11-18 03:06:00 | INFO    | Loaded 2562 series from existing sitemap.json

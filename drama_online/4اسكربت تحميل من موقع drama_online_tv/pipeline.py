@@ -9,16 +9,27 @@ import argparse
 import json
 import logging
 import os
+import random
 import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urljoin
 
-# Ensure standard UTF-8 console output on Windows
+# Windows Console & VT100 UTF-8 Configuration
 if sys.platform == "win32":
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        hStdOut = kernel32.GetStdHandle(-11)
+        mode = ctypes.c_ulong()
+        kernel32.GetConsoleMode(hStdOut, ctypes.byref(mode))
+        mode.value |= 0x0004  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        kernel32.SetConsoleMode(hStdOut, mode)
+    except Exception:
+        pass
     try:
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
@@ -27,8 +38,10 @@ if sys.platform == "win32":
 
 try:
     from curl_cffi import requests
+    HAS_CURL_CFFI = True
 except ImportError:
     import requests
+    HAS_CURL_CFFI = False
 
 from bs4 import BeautifulSoup
 from rich.console import Console
@@ -43,16 +56,99 @@ from rich.progress import (
     MofNCompleteColumn,
     TaskProgressColumn,
     TimeRemainingColumn,
+    TimeElapsedColumn,
 )
 
+# Safe styling for Windows CMD & PowerShell
+BOX_STYLE = box.ASCII if sys.platform == "win32" else box.ROUNDED
+
 # ==============================================================================
-# Paths & Global Configurations
+# Configuration Loader (config.json) with utf-8-sig BOM support
 # ==============================================================================
 CURRENT_DIR = Path(__file__).resolve().parent
-SERIES_DOWNLOAD_DIR = CURRENT_DIR / "series_download"
-SITEMAP_FILE = CURRENT_DIR / "sitemap.json"
-LOGS_DIR = CURRENT_DIR / "logs"
-LOG_FILE = LOGS_DIR / "pipeline.log"
+CONFIG_FILE = CURRENT_DIR / "config.json"
+
+DEFAULT_CONFIG = {
+    "_comment": "Drama Online Pipeline Configuration - Modify concurrency, delays, and behaviors here.",
+    "concurrency": {
+        "series_workers": 3,
+        "server_workers": 6,
+        "sitemap_workers": 10
+    },
+    "delays_and_timeouts": {
+        "inter_episode_delay_seconds": 0.8,
+        "request_timeout_seconds": 25,
+        "max_retries": 5
+    },
+    "pipeline_options": {
+        "default_mode": "all",
+        "test_series_count": 1,
+        "skip_servers": False,
+        "force_sitemap_refresh": False
+    },
+    "storage_paths": {
+        "series_download_dir": "series_download",
+        "sitemap_file": "sitemap.json",
+        "logs_dir": "logs",
+        "log_file": "pipeline.log"
+    },
+    "network": {
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    }
+}
+
+
+def load_config() -> dict:
+    """Load configuration from config.json with support for UTF-8 with BOM."""
+    if not CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_CONFIG, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+        return DEFAULT_CONFIG
+
+    try:
+        # Use utf-8-sig to automatically handle Windows Notepad UTF-8 BOM
+        with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
+            user_config = json.load(f)
+        merged = DEFAULT_CONFIG.copy()
+        for k, v in user_config.items():
+            if isinstance(v, dict) and k in merged and isinstance(merged[k], dict):
+                merged[k] = {**merged[k], **v}
+            else:
+                merged[k] = v
+        return merged
+    except Exception as e:
+        print(f"[!] Notice: Could not parse config.json ({e}). Using default configuration.")
+        return DEFAULT_CONFIG
+
+
+CONFIG = load_config()
+
+# Extract settings from CONFIG
+CONCURRENCY = CONFIG.get("concurrency", {})
+DELAYS = CONFIG.get("delays_and_timeouts", {})
+OPTIONS = CONFIG.get("pipeline_options", {})
+PATHS = CONFIG.get("storage_paths", {})
+NETWORK = CONFIG.get("network", {})
+
+SERIES_DOWNLOAD_DIR = CURRENT_DIR / PATHS.get("series_download_dir", "series_download")
+SITEMAP_FILE = CURRENT_DIR / PATHS.get("sitemap_file", "sitemap.json")
+LOGS_DIR = CURRENT_DIR / PATHS.get("logs_dir", "logs")
+LOG_FILE = LOGS_DIR / PATHS.get("log_file", "pipeline.log")
+
+DEFAULT_SERIES_WORKERS = int(CONCURRENCY.get("series_workers", 1))
+DEFAULT_SERVER_WORKERS = int(CONCURRENCY.get("server_workers", 1))
+DEFAULT_SITEMAP_WORKERS = int(CONCURRENCY.get("sitemap_workers", 6))
+
+INTER_SERVER_DELAY = float(DELAYS.get("inter_server_delay_seconds", 0.4))
+INTER_EPISODE_DELAY = float(DELAYS.get("inter_episode_delay_seconds", 1.2))
+INTER_SERIES_DELAY = float(DELAYS.get("inter_series_delay_seconds", 1.5))
+REQUEST_TIMEOUT = int(DELAYS.get("request_timeout_seconds", 25))
+MAX_RETRIES = int(DELAYS.get("max_retries", 5))
+
+USER_AGENT = NETWORK.get("user_agent", DEFAULT_CONFIG["network"]["user_agent"])
 
 BASE_URL = "https://drama-online.tv"
 FIRST_PAGE_URL = "https://drama-online.tv/drama-list/"
@@ -60,18 +156,10 @@ PAGE_URL_TEMPLATE = "https://drama-online.tv/drama-list/page/{page}/"
 AJAX_URL = "https://drama-online.tv/wp-admin/admin-ajax.php"
 
 DEFAULT_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "ar,en;q=0.9",
 }
-
-DEFAULT_SERIES_WORKERS = 3
-DEFAULT_SERVER_WORKERS = 6
-MAX_RETRIES = 4
 
 console = Console(highlight=False, safe_box=True)
 
@@ -85,6 +173,65 @@ logging.basicConfig(
     encoding="utf-8",
 )
 logger = logging.getLogger("drama_pipeline")
+
+
+# ==============================================================================
+# Robust HTTP Request with Anti-Ban Adaptive Circuit Breaker
+# ==============================================================================
+_CONSECUTIVE_RATE_LIMITS = 0
+
+def smart_get(url: str, headers: dict = None, timeout: int = REQUEST_TIMEOUT, max_retries: int = MAX_RETRIES):
+    """GET request with Anti-Ban Adaptive Circuit Breaker, automatic 429 backoff, and jitter."""
+    global _CONSECUTIVE_RATE_LIMITS
+    req_headers = headers or DEFAULT_HEADERS
+    for attempt in range(1, max_retries + 1):
+        try:
+            if HAS_CURL_CFFI:
+                resp = requests.get(url, headers=req_headers, impersonate="chrome", timeout=timeout)
+            else:
+                resp = requests.get(url, headers=req_headers, timeout=timeout)
+
+            resp_text = resp.text if hasattr(resp, "text") else ""
+            is_429 = (resp.status_code == 429)
+            if not is_429 and ("rate limit exceeded" in resp_text.lower() or "too many requests" in resp_text.lower()):
+                is_429 = True
+
+            if is_429:
+                _CONSECUTIVE_RATE_LIMITS += 1
+                wait_seconds = 35  # Safe base wait
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after and retry_after.isdigit():
+                    wait_seconds = int(retry_after) + 3
+                else:
+                    m = re.search(r"wait\s+(\d+)\s+seconds", resp_text, re.I)
+                    if m:
+                        wait_seconds = int(m.group(1)) + 3
+                    else:
+                        wait_seconds = max(35, 20 * attempt)
+
+                # Adaptive Escalation: Add extra padding for consecutive strikes to ensure 0 bans
+                if _CONSECUTIVE_RATE_LIMITS > 1:
+                    escalation = min((_CONSECUTIVE_RATE_LIMITS - 1) * 20, 80)
+                    wait_seconds += escalation
+
+                logger.warning(f"[Anti-Ban] Rate limited on {url}. Strike {_CONSECUTIVE_RATE_LIMITS}. Pausing {wait_seconds}s (Attempt {attempt}/{max_retries})")
+                console.print(f"[bold yellow]🛡️ [Anti-Ban Shield] Rate limit detected. Pausing {wait_seconds}s to protect your IP from firewall penalties (Strike {_CONSECUTIVE_RATE_LIMITS})...[/bold yellow]")
+                time.sleep(wait_seconds)
+                time.sleep(random.uniform(1.0, 3.0))  # Human jitter
+                continue
+
+            if resp.status_code == 200:
+                if _CONSECUTIVE_RATE_LIMITS > 0:
+                    _CONSECUTIVE_RATE_LIMITS = max(0, _CONSECUTIVE_RATE_LIMITS - 1)
+                return resp
+            elif resp.status_code == 404:
+                return resp
+            else:
+                time.sleep(attempt * 2.0 + random.uniform(0.5, 1.5))
+        except Exception:
+            time.sleep(attempt * 2.0 + random.uniform(0.5, 1.5))
+
+    return None
 
 
 # ==============================================================================
@@ -165,7 +312,7 @@ def download_banner(image_url: str, output_folder: Path) -> str:
         banner_filename = f"banner{ext}"
         dest_path = output_folder / banner_filename
 
-        # If already cached and valid size
+        # If already cached and valid size (> 1KB)
         if dest_path.exists() and dest_path.stat().st_size > 1000:
             return banner_filename
 
@@ -174,8 +321,8 @@ def download_banner(image_url: str, output_folder: Path) -> str:
             shutil.copy2(image_url, dest_path)
             return banner_filename
 
-        resp = requests.get(image_url, headers=DEFAULT_HEADERS, timeout=20)
-        if resp.status_code == 200 and resp.content:
+        resp = smart_get(image_url, timeout=20)
+        if resp and resp.status_code == 200 and resp.content:
             with open(dest_path, "wb") as f:
                 f.write(resp.content)
             logger.info(f"Downloaded banner for {output_folder.name}: {banner_filename}")
@@ -211,42 +358,41 @@ def parse_sitemap_cards(html_text: str) -> list[dict]:
 
 def fetch_sitemap_page(page: int) -> tuple[int, list[dict]]:
     url = PAGE_URL_TEMPLATE.format(page=page) if page > 1 else FIRST_PAGE_URL
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            resp = requests.get(url, headers=DEFAULT_HEADERS, impersonate="chrome", timeout=20)
-            if resp.status_code == 200:
-                return page, parse_sitemap_cards(resp.text)
-            elif resp.status_code == 404:
-                return page, []
-            time.sleep(attempt * 1.5)
-        except Exception:
-            time.sleep(attempt * 1.5)
+    resp = smart_get(url, timeout=REQUEST_TIMEOUT)
+    if resp and resp.status_code == 200:
+        return page, parse_sitemap_cards(resp.text)
     return page, []
 
 
-def step_1_sitemap(force: bool = False, workers: int = 10) -> list[dict]:
-    console.print(Panel("[bold cyan]Stage 1: Catalog Discovery & Sitemap Verification[/bold cyan]", border_style="cyan", box=box.ROUNDED))
+def step_1_sitemap(force: bool = False, workers: int = DEFAULT_SITEMAP_WORKERS) -> list[dict]:
+    console.print(Panel(
+        "[bold cyan]STAGE 1: Catalog Discovery & Sitemap Verification[/bold cyan]",
+        border_style="cyan",
+        box=BOX_STYLE
+    ))
     logger.info("--- Starting Step 1: Sitemap ---")
 
     if SITEMAP_FILE.exists() and not force:
-        with open(SITEMAP_FILE, "r", encoding="utf-8") as f:
-            all_series = json.load(f)
-        console.print(f"[green]✓ Found local sitemap.json with [bold]{len(all_series)}[/bold] series ready.[/green]\n")
-        logger.info(f"Loaded {len(all_series)} series from existing sitemap.json")
-        return all_series
+        try:
+            with open(SITEMAP_FILE, "r", encoding="utf-8-sig") as f:
+                all_series = json.load(f)
+            console.print(f"[green][OK] Verified local sitemap.json with [bold]{len(all_series)}[/bold] series indexed.[/green]\n")
+            logger.info(f"Loaded {len(all_series)} series from existing sitemap.json")
+            return all_series
+        except Exception as e:
+            logger.warning(f"Failed to read local sitemap.json: {e}")
 
-    # Auto-detect total pages from page 1
     total_pages = 125
     try:
-        r1 = requests.get(FIRST_PAGE_URL, headers=DEFAULT_HEADERS, impersonate="chrome", timeout=20)
-        if r1.status_code == 200:
+        r1 = smart_get(FIRST_PAGE_URL, timeout=REQUEST_TIMEOUT)
+        if r1 and r1.status_code == 200:
             m = re.search(r"Page\s+\d+\s+of\s+(\d+)", r1.text, re.I)
             if m:
                 total_pages = int(m.group(1))
     except Exception as e:
         logger.warning(f"Failed to auto-detect total pages: {e}")
 
-    console.print(f"[*] Scraping [bold]{total_pages}[/bold] catalog pages from site...")
+    console.print(f"[*] Crawling [bold]{total_pages}[/bold] catalog pages from site with {workers} worker threads...")
 
     pages_data = {}
     pending = list(range(1, total_pages + 1))
@@ -254,7 +400,7 @@ def step_1_sitemap(force: bool = False, workers: int = 10) -> list[dict]:
 
     while pending and round_n <= 3:
         current_workers = workers if round_n == 1 else 4
-        desc = "Scraping catalog pages" if round_n == 1 else f"Retrying missing pages (Round {round_n})"
+        desc = "Crawling catalog pages" if round_n == 1 else f"Retrying missing pages (Round {round_n})"
 
         with Progress(
             SpinnerColumn(),
@@ -288,13 +434,13 @@ def step_1_sitemap(force: bool = False, workers: int = 10) -> list[dict]:
     with open(SITEMAP_FILE, "w", encoding="utf-8") as f:
         json.dump(all_series, f, ensure_ascii=False, indent=2)
 
-    console.print(f"[bold green]✓ Stage 1 Complete: Saved {len(all_series)} series to sitemap.json[/bold green]\n")
+    console.print(f"[bold green][OK] Stage 1 Complete: Successfully cached {len(all_series)} series into sitemap.json[/bold green]\n")
     logger.info(f"Step 1 Complete: {len(all_series)} series saved to sitemap.json")
     return all_series
 
 
 # ==============================================================================
-# Stage 2: Series Metadata, Banners & Episodes
+# Stage 2: Metadata, Banners & Episodes Parsers
 # ==============================================================================
 def parse_episodes_from_html(html_snippet: str) -> list[dict]:
     soup = BeautifulSoup(html_snippet, "html.parser")
@@ -434,8 +580,7 @@ def parse_series_metadata(soup: BeautifulSoup, default_url: str = "") -> dict:
     }
 
 
-def fetch_more_episodes_ajax(drama_id: str, season: str = "1", start_page: int = 2, referer_url: str = BASE_URL, max_retries: int = 4) -> list[dict]:
-    """Fetch all remaining episodes via WordPress admin-ajax endpoint."""
+def fetch_more_episodes_ajax(drama_id: str, season: str = "1", start_page: int = 2, referer_url: str = BASE_URL, max_retries: int = MAX_RETRIES) -> list[dict]:
     all_extra_episodes = []
     current_page = start_page
     headers = {
@@ -457,7 +602,11 @@ def fetch_more_episodes_ajax(drama_id: str, season: str = "1", start_page: int =
 
         for attempt in range(1, max_retries + 1):
             try:
-                resp = requests.post(AJAX_URL, data=payload, headers=headers, impersonate="chrome", timeout=25)
+                if HAS_CURL_CFFI:
+                    resp = requests.post(AJAX_URL, data=payload, headers=headers, impersonate="chrome", timeout=REQUEST_TIMEOUT)
+                else:
+                    resp = requests.post(AJAX_URL, data=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+
                 if resp.status_code == 200:
                     data = resp.json()
                     if data.get("success"):
@@ -469,9 +618,12 @@ def fetch_more_episodes_ajax(drama_id: str, season: str = "1", start_page: int =
                             all_extra_episodes.extend(new_eps)
                         page_success = True
                         break
-                time.sleep(attempt * 2.0)
+                elif resp.status_code == 429:
+                    time.sleep(30)
+                    continue
+                time.sleep(attempt * 1.5)
             except Exception:
-                time.sleep(attempt * 2.0)
+                time.sleep(attempt * 1.5)
 
         if not page_success or not remaining:
             break
@@ -480,174 +632,6 @@ def fetch_more_episodes_ajax(drama_id: str, season: str = "1", start_page: int =
         time.sleep(0.5)
 
     return all_extra_episodes
-
-
-def process_single_series_episodes(series_url: str, force: bool = False) -> Path:
-    """Extract series details, download poster, and generate info.json with resume capability."""
-    # Check if series is already processed
-    for existing_folder in SERIES_DOWNLOAD_DIR.iterdir():
-        if existing_folder.is_dir():
-            info_f = existing_folder / "info.json"
-            if info_f.exists():
-                try:
-                    with open(info_f, "r", encoding="utf-8") as jf:
-                        d = json.load(jf)
-                    if d.get("url") == series_url and not force:
-                        if d.get("episodes") and len(d["episodes"]) > 0:
-                            return existing_folder
-                except Exception:
-                    pass
-
-    html_content = ""
-    for attempt in range(1, 4):
-        try:
-            resp = requests.get(series_url, headers=DEFAULT_HEADERS, impersonate="chrome", timeout=25)
-            if resp.status_code == 200:
-                html_content = resp.text
-                break
-            time.sleep(attempt * 2.0)
-        except Exception:
-            time.sleep(attempt * 2.0)
-
-    if not html_content:
-        logger.error(f"Failed to fetch series page: {series_url}")
-        return None
-
-    soup = BeautifulSoup(html_content, "html.parser")
-    meta = parse_series_metadata(soup, default_url=series_url)
-    if meta.get("url"):
-        series_url = meta["url"]
-
-    episodes = parse_episodes_from_html(html_content)
-
-    btn = soup.find(id="load-more-episodes")
-    drama_id = meta.get("drama_id")
-    season = meta.get("season", "1")
-
-    if btn and drama_id:
-        start_page = int(btn.get("data-page", 2))
-        extra_episodes = fetch_more_episodes_ajax(
-            drama_id=drama_id,
-            season=season,
-            start_page=start_page,
-            referer_url=series_url
-        )
-        episodes.extend(extra_episodes)
-
-    seen_urls = set()
-    unique_episodes = []
-    for ep in episodes:
-        if ep["url"] not in seen_urls:
-            seen_urls.add(ep["url"])
-            unique_episodes.append(ep)
-
-    def sort_key(item):
-        num = item.get("episode_number")
-        if isinstance(num, int):
-            return (0, num)
-        if isinstance(num, str) and num.isdigit():
-            return (0, int(num))
-        return (1, 0)
-
-    unique_episodes.sort(key=sort_key)
-
-    folder_name = sanitize_filename(meta["title_en"] or meta["title"] or "Series")
-    series_folder = SERIES_DOWNLOAD_DIR / folder_name
-    series_folder.mkdir(parents=True, exist_ok=True)
-
-    banner_target_url = meta.get("poster") or meta.get("banner")
-    banner_file_name = download_banner(banner_target_url, series_folder)
-
-    series_data = {
-        "title": meta["title"],
-        "title_en": meta["title_en"],
-        "title_ar": meta["title_ar"],
-        "other_names": meta["other_names"],
-        "url": meta["url"],
-        "drama_id": meta["drama_id"],
-        "country": meta["country"],
-        "year": meta["year"],
-        "status": meta["status"],
-        "rating": meta["rating"],
-        "declared_episodes": meta["declared_episodes"],
-        "total_episodes_fetched": len(unique_episodes),
-        "story": meta["story"],
-        "poster": meta["poster"],
-        "banner": meta.get("banner") or meta.get("poster"),
-        "banner_file": banner_file_name or "banner.jpg",
-        "episodes": unique_episodes
-    }
-
-    info_file_path = series_folder / "info.json"
-    with open(info_file_path, "w", encoding="utf-8") as f:
-        json.dump(series_data, f, ensure_ascii=False, indent=2)
-
-    logger.info(f"Saved series info: {meta['title']} ({len(unique_episodes)} episodes) in {series_folder.name}")
-    return series_folder
-
-
-def step_2_series_and_episodes(series_list: list[dict], workers: int = DEFAULT_SERIES_WORKERS) -> list[Path]:
-    console.print(Panel("[bold magenta]Stage 2: Series Metadata, Cover Art & Episodes Harvesting[/bold magenta]", border_style="magenta", box=box.ROUNDED))
-    logger.info("--- Starting Step 2: Series & Episodes ---")
-
-    SERIES_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Check for already completed series to support instant resume
-    pending_items = []
-    already_done = 0
-
-    for item in series_list:
-        clean_name = sanitize_filename(item["title"])
-        f_path = SERIES_DOWNLOAD_DIR / clean_name
-        info_f = f_path / "info.json"
-        banner_f = f_path / "banner.jpg"
-
-        if info_f.exists() and banner_f.exists():
-            try:
-                with open(info_f, "r", encoding="utf-8") as jf:
-                    d = json.load(jf)
-                if d.get("episodes") and len(d["episodes"]) > 0:
-                    already_done += 1
-                    continue
-            except Exception:
-                pass
-
-        pending_items.append(item)
-
-    console.print(f"Total Series: [bold]{len(series_list)}[/bold] | Already Cached: [bold green]{already_done}[/bold green] | Pending: [bold yellow]{len(pending_items)}[/bold yellow]")
-
-    if not pending_items:
-        console.print("[green]✓ All series metadata, banners, and episodes are already completed. Skipping Stage 2.[/green]\n")
-        return [f for f in SERIES_DOWNLOAD_DIR.iterdir() if f.is_dir() and (f / "info.json").exists()]
-
-    completed_folders = []
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[bold magenta]{task.description}"),
-        BarColumn(bar_width=35),
-        MofNCompleteColumn(),
-        TaskProgressColumn(),
-        TimeRemainingColumn(),
-        TextColumn("[cyan]{task.fields[current]}"),
-        console=console
-    ) as progress:
-        task = progress.add_task("Harvesting series data...", total=len(pending_items), current="")
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(process_single_series_episodes, it["url"]): it
-                for it in pending_items
-            }
-            for fut in as_completed(futures):
-                folder = fut.result()
-                if folder:
-                    completed_folders.append(folder)
-                    progress.update(task, current=f"{folder.name[:25]}")
-                progress.advance(task)
-
-    console.print(f"[bold green]✓ Stage 2 Complete: Processed {len(completed_folders)} new series folders.[/bold green]\n")
-    logger.info(f"Step 2 Complete: {len(completed_folders)} new folders processed")
-
-    return [f for f in SERIES_DOWNLOAD_DIR.iterdir() if f.is_dir() and (f / "info.json").exists()]
 
 
 # ==============================================================================
@@ -695,8 +679,8 @@ def fetch_single_server_embed(api_url: str, episode_id: str, nonce: str, server_
 
     try:
         api_endpoint = f"{api_url}?ep={episode_id}&srv={srv_idx}"
-        resp = requests.get(api_endpoint, headers=headers, timeout=12)
-        if resp.status_code != 200:
+        resp = smart_get(api_endpoint, headers=headers, timeout=12, max_retries=3)
+        if not resp or resp.status_code != 200:
             return result
 
         data = resp.json()
@@ -704,8 +688,8 @@ def fetch_single_server_embed(api_url: str, episode_id: str, nonce: str, server_
             return result
 
         watch_url = data["url"]
-        resp_watch = requests.get(watch_url, headers=headers, timeout=12)
-        if resp_watch.status_code == 200:
+        resp_watch = smart_get(watch_url, headers=headers, timeout=12, max_retries=2)
+        if resp_watch and resp_watch.status_code == 200:
             watch_html = resp_watch.text
             soup_watch = BeautifulSoup(watch_html, "html.parser")
             iframe = soup_watch.find("iframe")
@@ -735,26 +719,27 @@ def fetch_single_server_embed(api_url: str, episode_id: str, nonce: str, server_
 
 
 def extract_servers_for_episode(ep_url: str, workers: int = DEFAULT_SERVER_WORKERS) -> tuple[str, dict]:
-    try:
-        resp = requests.get(ep_url, headers=DEFAULT_HEADERS, impersonate="chrome", timeout=20)
-        if resp.status_code != 200:
-            return "", {}
-        html = resp.text
-    except Exception:
+    resp = smart_get(ep_url, timeout=REQUEST_TIMEOUT)
+    if not resp or resp.status_code != 200:
         return "", {}
 
-    page_title, episode_id, nonce, api_url, server_buttons = parse_episode_servers_page(html)
+    page_title, episode_id, nonce, api_url, server_buttons = parse_episode_servers_page(resp.text)
     if not episode_id or not server_buttons:
         return page_title, {}
 
     results = []
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(fetch_single_server_embed, api_url, episode_id, nonce, srv): srv
-            for srv in server_buttons
-        }
-        for fut in as_completed(futures):
-            results.append(fut.result())
+    if workers <= 1:
+        for srv in server_buttons:
+            results.append(fetch_single_server_embed(api_url, episode_id, nonce, srv))
+            time.sleep(INTER_SERVER_DELAY + random.uniform(0.1, 0.4))
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(fetch_single_server_embed, api_url, episode_id, nonce, srv): srv
+                for srv in server_buttons
+            }
+            for fut in as_completed(futures):
+                results.append(fut.result())
 
     index_map = {srv["index"]: i for i, srv in enumerate(server_buttons)}
     results.sort(key=lambda x: index_map.get(x.get("index", 999), 999))
@@ -774,93 +759,293 @@ def extract_servers_for_episode(ep_url: str, workers: int = DEFAULT_SERVER_WORKE
     return page_title, servers_dict
 
 
-def process_series_servers(series_folder: Path, server_workers: int = DEFAULT_SERVER_WORKERS) -> tuple[Path, int]:
-    info_file = series_folder / "info.json"
-    if not info_file.exists():
-        return series_folder, 0
+# ==============================================================================
+# Unified End-to-End Per-Series Processor
+# ==============================================================================
+def is_series_fully_completed(series_url: str) -> tuple[bool, Path, dict]:
+    """Check if a series is already 100% processed (info.json + banner + servers)."""
+    if not SERIES_DOWNLOAD_DIR.exists():
+        return False, None, None
 
-    try:
-        with open(info_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
+    for folder in SERIES_DOWNLOAD_DIR.iterdir():
+        if folder.is_dir():
+            info_f = folder / "info.json"
+            banner_f = folder / "banner.jpg"
+            if info_f.exists() and banner_f.exists():
+                try:
+                    with open(info_f, "r", encoding="utf-8-sig") as f:
+                        data = json.load(f)
+                    if data.get("url") == series_url:
+                        episodes = data.get("episodes", [])
+                        if episodes and all(ep.get("servers") and len(ep["servers"]) > 0 for ep in episodes):
+                            return True, folder, data
+                        return False, folder, data
+                except Exception:
+                    pass
+    return False, None, None
 
-        episodes = data.get("episodes", [])
-        if not episodes:
-            return series_folder, 0
 
-        updated_count = 0
+def process_single_series_end_to_end(
+    series_item: dict,
+    index: int,
+    total: int,
+    progress: Progress,
+    task_overall: int,
+    task_current: int,
+    skip_servers: bool = False,
+    server_workers: int = DEFAULT_SERVER_WORKERS,
+) -> tuple[bool, int, int]:
+    """Process an entire series from metadata to poster to full embed servers."""
+    series_title = series_item.get("title", "Unknown Series")
+    series_url = series_item.get("url", "")
+
+    # 1. Check if completely finished already
+    is_done, existing_folder, cached_data = is_series_fully_completed(series_url)
+    if is_done and not skip_servers:
+        eps_count = len(cached_data.get("episodes", []))
+        srv_count = sum(len(ep.get("servers", {})) for ep in cached_data.get("episodes", []))
+        progress.console.print(
+            f"[dim][OK] [{index}/{total}] Already Cached: [bold cyan]{series_title[:38]}[/bold cyan] ({eps_count} eps | {srv_count} servers)[/dim]"
+        )
+        progress.advance(task_overall)
+        return False, eps_count, srv_count
+
+    # 2. Extract or load metadata & episodes
+    series_folder = existing_folder
+    series_data = cached_data
+
+    if not series_data:
+        progress.update(task_current, description=f"[bold cyan]Fetching Metadata: {series_title[:28]}...", total=10, completed=1)
+
+        resp = smart_get(series_url, timeout=REQUEST_TIMEOUT, max_retries=MAX_RETRIES)
+        if not resp or resp.status_code != 200:
+            progress.console.print(f"[bold red][FAIL] [{index}/{total}] Failed to load page: {series_title}[/bold red]")
+            logger.error(f"Failed to fetch series HTML: {series_url}")
+            progress.advance(task_overall)
+            return False, 0, 0
+
+        html_content = resp.text
+        soup = BeautifulSoup(html_content, "html.parser")
+        meta = parse_series_metadata(soup, default_url=series_url)
+        if meta.get("url"):
+            series_url = meta["url"]
+
+        episodes = parse_episodes_from_html(html_content)
+
+        # AJAX load more pagination
+        btn = soup.find(id="load-more-episodes")
+        drama_id = meta.get("drama_id")
+        season = meta.get("season", "1")
+
+        if btn and drama_id:
+            start_page = int(btn.get("data-page", 2))
+            progress.update(task_current, description=f"[bold magenta]AJAX Pagination: {series_title[:25]}...")
+            extra_episodes = fetch_more_episodes_ajax(
+                drama_id=drama_id,
+                season=season,
+                start_page=start_page,
+                referer_url=series_url
+            )
+            episodes.extend(extra_episodes)
+
+        seen_urls = set()
+        unique_episodes = []
         for ep in episodes:
-            if ep.get("servers") and len(ep["servers"]) > 0:
-                continue
+            if ep["url"] not in seen_urls:
+                seen_urls.add(ep["url"])
+                unique_episodes.append(ep)
 
-            ep_url = ep.get("url")
-            if not ep_url:
-                continue
+        def sort_key(item):
+            num = item.get("episode_number")
+            if isinstance(num, int):
+                return (0, num)
+            if isinstance(num, str) and num.isdigit():
+                return (0, int(num))
+            return (1, 0)
 
-            title, servers = extract_servers_for_episode(ep_url, workers=server_workers)
-            if title:
-                ep["title"] = title
-            ep["servers"] = servers
-            updated_count += 1
+        unique_episodes.sort(key=sort_key)
 
-            # Atomic save: persist state immediately after each episode
-            with open(info_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+        folder_name = sanitize_filename(meta["title_en"] or meta["title"] or series_title)
+        series_folder = SERIES_DOWNLOAD_DIR / folder_name
+        series_folder.mkdir(parents=True, exist_ok=True)
 
-            time.sleep(0.8)  # Polite delay to avoid Cloudflare rate limiting
+        # Download banner
+        banner_target_url = meta.get("poster") or meta.get("banner")
+        banner_file_name = download_banner(banner_target_url, series_folder)
 
-        return series_folder, updated_count
-    except Exception as e:
-        logger.error(f"Error processing servers in {series_folder.name}: {e}")
-        return series_folder, 0
+        series_data = {
+            "title": meta["title"] or series_title,
+            "title_en": meta["title_en"],
+            "title_ar": meta["title_ar"],
+            "other_names": meta["other_names"],
+            "url": meta["url"] or series_url,
+            "drama_id": meta["drama_id"],
+            "country": meta["country"],
+            "year": meta["year"],
+            "status": meta["status"],
+            "rating": meta["rating"],
+            "declared_episodes": meta["declared_episodes"],
+            "total_episodes_fetched": len(unique_episodes),
+            "story": meta["story"],
+            "poster": meta["poster"],
+            "banner": meta.get("banner") or meta.get("poster"),
+            "banner_file": banner_file_name or "banner.jpg",
+            "episodes": unique_episodes
+        }
 
+        # Commit initial metadata
+        with open(series_folder / "info.json", "w", encoding="utf-8") as f:
+            json.dump(series_data, f, ensure_ascii=False, indent=2)
 
-def step_3_servers(folders: list[Path], workers: int = 2, server_workers: int = DEFAULT_SERVER_WORKERS):
-    console.print(Panel("[bold green]Stage 3: Video Embed Extraction & Decryption[/bold green]", border_style="green", box=box.ROUNDED))
-    logger.info("--- Starting Step 3: Embed Servers ---")
+    episodes = series_data.get("episodes", [])
+    total_eps = len(episodes)
+    resolved_servers_count = sum(len(ep.get("servers", {})) for ep in episodes)
 
-    pending_folders = []
-    for f in folders:
-        info_f = f / "info.json"
-        if not info_f.exists():
+    if skip_servers:
+        progress.console.print(
+            f"[green][OK] [{index}/{total}] Metadata Ready: [bold]{series_title[:35]}[/bold] ({total_eps} episodes | Banner OK)[/green]"
+        )
+        progress.advance(task_overall)
+        return True, total_eps, resolved_servers_count
+
+    # 3. Resolve Video Embed Servers
+    progress.update(task_current, description=f"[bold green]{series_title[:28]}[/bold green]", total=total_eps, completed=0)
+
+    episodes_updated = 0
+    new_servers_added = 0
+
+    for ep_idx, ep in enumerate(episodes, 1):
+        existing_srv = ep.get("servers")
+        if existing_srv and len(existing_srv) > 0:
+            progress.advance(task_current)
             continue
-        try:
-            with open(info_f, "r", encoding="utf-8") as jf:
-                d = json.load(jf)
-            eps = d.get("episodes", [])
-            if any(not ep.get("servers") or len(ep.get("servers", {})) == 0 for ep in eps):
-                pending_folders.append(f)
-        except Exception:
-            pending_folders.append(f)
 
-    console.print(f"Total Folders: [bold]{len(folders)}[/bold] | Fully Resolved: [bold green]{len(folders) - len(pending_folders)}[/bold green] | Pending Resolution: [bold yellow]{len(pending_folders)}[/bold yellow]")
+        ep_url = ep.get("url")
+        if not ep_url:
+            progress.advance(task_current)
+            continue
 
-    if not pending_folders:
-        console.print("[green]✓ All episodes already have streaming servers resolved. Stage 3 complete.[/green]\n")
-        return
+        progress.update(
+            task_current,
+            description=f"[bold green]{series_title[:24]}[/bold green] (Ep {ep_idx}/{total_eps})"
+        )
 
+        title, servers = extract_servers_for_episode(ep_url, workers=server_workers)
+        if title:
+            ep["title"] = title
+        ep["servers"] = servers
+        episodes_updated += 1
+        new_servers_added += len(servers)
+
+        # Atomic per-episode save
+        with open(series_folder / "info.json", "w", encoding="utf-8") as f:
+            json.dump(series_data, f, ensure_ascii=False, indent=2)
+
+        progress.advance(task_current)
+        time.sleep(INTER_EPISODE_DELAY + random.uniform(0.2, 0.5))
+
+    total_servers = sum(len(ep.get("servers", {})) for ep in episodes)
+
+    progress.console.print(
+        f"[bold green][OK] [{index}/{total}] Completed: [bold white]{series_title[:32]}[/bold white] | [cyan]{total_eps} Episodes[/cyan] | [yellow]{total_servers} Embed Servers[/yellow] | [magenta]banner.jpg[/magenta][/bold green]"
+    )
+    logger.info(f"Completed {series_title}: {total_eps} eps, {total_servers} servers")
+
+    progress.advance(task_overall)
+    return True, total_eps, total_servers
+
+
+# ==============================================================================
+# Live Terminal Orchestrator & Monitoring Dashboard
+# ==============================================================================
+def run_live_pipeline(series_list: list[dict], skip_servers: bool = False, server_workers: int = DEFAULT_SERVER_WORKERS):
+    SERIES_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    total_series = len(series_list)
+    start_time = time.time()
+
+    # Pre-scan existing downloads for dashboard metrics
+    initial_completed_series = 0
+    initial_total_episodes = 0
+    initial_total_servers = 0
+
+    for f in SERIES_DOWNLOAD_DIR.iterdir():
+        if f.is_dir():
+            info_f = f / "info.json"
+            if info_f.exists():
+                try:
+                    with open(info_f, "r", encoding="utf-8-sig") as jf:
+                        d = json.load(jf)
+                    eps = d.get("episodes", [])
+                    if eps:
+                        initial_completed_series += 1
+                        initial_total_episodes += len(eps)
+                        for ep in eps:
+                            initial_total_servers += len(ep.get("servers", {}))
+                except Exception:
+                    pass
+
+    # Dashboard Overview Header
+    dash_table = Table(box=BOX_STYLE, border_style="cyan", show_header=False)
+    dash_table.add_column("Key", style="bold cyan", width=26)
+    dash_table.add_column("Val", style="bold yellow", width=42)
+
+    dash_table.add_row("Total Catalog Target", f"{total_series:,} Series")
+    dash_table.add_row("Existing Cached Series", f"{initial_completed_series:,} Series")
+    dash_table.add_row("Existing Total Episodes", f"{initial_total_episodes:,} Episodes")
+    dash_table.add_row("Existing Embed Servers", f"{initial_total_servers:,} Video Links")
+    dash_table.add_row("Concurrency Profile", f"Server Workers: {server_workers} | Polite Delay: {INTER_EPISODE_DELAY}s")
+    dash_table.add_row("Workspace Directory", str(SERIES_DOWNLOAD_DIR.name))
+
+    console.print(Panel(
+        dash_table,
+        title="[bold green]Pipeline Dashboard - Initial Status[/bold green]",
+        border_style="green",
+        box=BOX_STYLE
+    ))
+    console.print()
+
+    # Multi-Progress Live Display
     with Progress(
         SpinnerColumn(),
-        TextColumn("[bold green]{task.description}"),
-        BarColumn(bar_width=35),
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(bar_width=38),
         MofNCompleteColumn(),
         TaskProgressColumn(),
+        TimeElapsedColumn(),
         TimeRemainingColumn(),
-        TextColumn("[cyan]{task.fields[current]}"),
         console=console
     ) as progress:
-        task = progress.add_task("Extracting episode servers...", total=len(pending_folders), current="")
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(process_series_servers, folder, server_workers): folder
-                for folder in pending_folders
-            }
-            for fut in as_completed(futures):
-                folder, updated = fut.result()
-                progress.update(task, current=f"{folder.name[:20]} (+{updated} eps)")
-                progress.advance(task)
+        task_overall = progress.add_task(
+            "[bold cyan]Overall Catalog Progress[/bold cyan]",
+            total=total_series
+        )
+        task_current = progress.add_task(
+            "[bold magenta]Active Drama Episodes[/bold magenta]",
+            total=10,
+            completed=0
+        )
 
-    console.print("[bold green]✓ Stage 3 Complete: All episode embed servers extracted and verified successfully.[/bold green]\n")
-    logger.info("Step 3 Complete: All servers extracted")
+        try:
+            for idx, item in enumerate(series_list, 1):
+                was_new, eps_c, srv_c = process_single_series_end_to_end(
+                    series_item=item,
+                    index=idx,
+                    total=total_series,
+                    progress=progress,
+                    task_overall=task_overall,
+                    task_current=task_current,
+                    skip_servers=skip_servers,
+                    server_workers=server_workers
+                )
+                if was_new:
+                    time.sleep(INTER_SERIES_DELAY + random.uniform(0.3, 0.8))
+        except KeyboardInterrupt:
+            progress.console.print("\n[bold yellow]>> Execution paused by user (Ctrl+C).[/bold yellow]")
+            progress.console.print("[green]All fetched series, episodes, and servers are safely preserved on disk.[/green]")
+            logger.info("Pipeline stopped by user (KeyboardInterrupt)")
+
+    # Final Summary Table
+    display_summary(start_time)
 
 
 # ==============================================================================
@@ -869,6 +1054,9 @@ def step_3_servers(folders: list[Path], workers: int = 2, server_workers: int = 
 def display_summary(start_time: float):
     elapsed = time.time() - start_time
     minutes, seconds = divmod(int(elapsed), 60)
+    hours, minutes = divmod(minutes, 60)
+
+    time_str = f"{hours}h {minutes}m {seconds}s" if hours > 0 else f"{minutes} min {seconds} sec"
 
     folders = [f for f in SERIES_DOWNLOAD_DIR.iterdir() if f.is_dir() and (f / "info.json").exists()]
     total_episodes = 0
@@ -876,7 +1064,7 @@ def display_summary(start_time: float):
 
     for f in folders:
         try:
-            with open(f / "info.json", "r", encoding="utf-8") as jf:
+            with open(f / "info.json", "r", encoding="utf-8-sig") as jf:
                 d = json.load(jf)
             eps = d.get("episodes", [])
             total_episodes += len(eps)
@@ -885,66 +1073,72 @@ def display_summary(start_time: float):
         except Exception:
             pass
 
-    table = Table(title="[bold green]📊 Pipeline Execution Summary[/bold green]", border_style="bright_blue", box=box.ROUNDED)
-    table.add_column("Metric", style="bold cyan", width=32)
-    table.add_column("Value", style="bold yellow", width=32)
+    table = Table(title="[bold green]Pipeline Execution Final Metrics[/bold green]", border_style="bright_blue", box=BOX_STYLE)
+    table.add_column("Metric", style="bold cyan", width=34)
+    table.add_column("Value", style="bold yellow", width=34)
 
-    table.add_row("Total Series Processed", str(len(folders)))
-    table.add_row("Total Episodes Fetched", str(total_episodes))
-    table.add_row("Total Embed Server Links", str(total_servers))
-    table.add_row("Storage Workspace", str(SERIES_DOWNLOAD_DIR.name))
-    table.add_row("Operational Log File", str(LOG_FILE.name))
-    table.add_row("Total Elapsed Time", f"{minutes} min {seconds} sec")
+    table.add_row("Total Processed Series", f"{len(folders):,}")
+    table.add_row("Total Harvested Episodes", f"{total_episodes:,}")
+    table.add_row("Total Resolved Embed Servers", f"{total_servers:,}")
+    table.add_row("Storage Workspace", str(SERIES_DOWNLOAD_DIR))
+    table.add_row("Audit Log File", str(LOG_FILE))
+    table.add_row("Configuration Profile", str(CONFIG_FILE.name))
+    table.add_row("Total Elapsed Runtime", time_str)
 
+    console.print()
     console.print(table)
-    console.print(Panel(f"[bold green]✨ All pipeline stages completed successfully! Output stored at:[/bold green]\n[cyan]{SERIES_DOWNLOAD_DIR}[/cyan]", border_style="green", box=box.ROUNDED))
-
-
-# ==============================================================================
-# Main Entry Point (CLI Execution)
-# ==============================================================================
-def main():
-    parser = argparse.ArgumentParser(description="Drama Online Master Automation Pipeline")
-    parser.add_argument("--all", "-a", action="store_true", help="Explicitly run full pipeline on all series in catalog")
-    parser.add_argument("--test", "-t", type=int, nargs="?", const=1, help="Run test mode on N series only (e.g. --test 3)")
-    parser.add_argument("--force-sitemap", action="store_true", help="Force fresh web scraping of sitemap.json")
-    parser.add_argument("--skip-servers", action="store_true", help="Extract metadata, posters, and episodes while skipping servers")
-    parser.add_argument("--series-workers", type=int, default=DEFAULT_SERIES_WORKERS, help="Concurrent series workers (Stage 2)")
-    parser.add_argument("--server-workers", type=int, default=DEFAULT_SERVER_WORKERS, help="Concurrent server resolution workers (Stage 3)")
-    args = parser.parse_args()
-
-    start_time = time.time()
-
-    console.print(Panel.fit(
-        "[bold green]🚀 Drama Online Full Pipeline Automation[/bold green]\n"
-        "[cyan]End-to-End Media Pipeline: Catalog -> Metadata -> Banner -> Episodes -> Decrypted Embeds[/cyan]",
-        border_style="bold green",
-        box=box.ROUNDED
+    console.print(Panel(
+        f"[bold green]All completed data is organized, verified, and saved at:[/bold green]\n[cyan]{SERIES_DOWNLOAD_DIR}[/cyan]",
+        border_style="green",
+        box=BOX_STYLE
     ))
 
-    # Stage 1: Sitemap Catalog
-    all_series = step_1_sitemap(force=args.force_sitemap)
 
-    # Determine execution scope: DEFAULT IS ALL SERIES!
+# ==============================================================================
+# Main Entry Point
+# ==============================================================================
+def main():
+    default_mode = OPTIONS.get("default_mode", "all")
+    test_default_count = int(OPTIONS.get("test_series_count", 1))
+    skip_servers_default = bool(OPTIONS.get("skip_servers", False))
+    force_sitemap_default = bool(OPTIONS.get("force_sitemap_refresh", False))
+
+    parser = argparse.ArgumentParser(description="Drama Online Master Automation Pipeline")
+    parser.add_argument("--all", "-a", action="store_true", help="Explicitly run full pipeline on all series in catalog")
+    parser.add_argument("--test", "-t", type=int, nargs="?", const=test_default_count, help="Run test mode on N series only (e.g. --test 3)")
+    parser.add_argument("--force-sitemap", action="store_true", default=force_sitemap_default, help="Force fresh web scraping of sitemap.json")
+    parser.add_argument("--skip-servers", action="store_true", default=skip_servers_default, help="Extract metadata, posters, and episodes while skipping servers")
+    parser.add_argument("--server-workers", type=int, default=DEFAULT_SERVER_WORKERS, help=f"Concurrent server resolution workers (default: {DEFAULT_SERVER_WORKERS})")
+    args = parser.parse_args()
+
+    console.print(Panel.fit(
+        "[bold green]Drama Online Master Automation Pipeline[/bold green]\n"
+        "[cyan]End-to-End Media Ingestion: Catalog -> Metadata -> Banner -> Episodes -> Decrypted Embeds[/cyan]\n"
+        f"[dim]Loaded configuration profile: {CONFIG_FILE.name}[/dim]",
+        border_style="bold green",
+        box=BOX_STYLE
+    ))
+
+    # Stage 1: Load or Crawl Sitemap
+    all_series = step_1_sitemap(force=args.force_sitemap, workers=DEFAULT_SITEMAP_WORKERS)
+
+    # Determine execution scope
     if args.test:
         target_series = all_series[:args.test]
-        console.print(f"[bold yellow]⚠️ Test mode active: Processing first {len(target_series)} series only.[/bold yellow]\n")
+        console.print(f"[bold yellow]>> Test mode active: Processing first {len(target_series)} series only.[/bold yellow]\n")
+    elif default_mode == "test" and not args.all:
+        target_series = all_series[:test_default_count]
+        console.print(f"[bold yellow]>> Config test mode: Processing first {len(target_series)} series.[/bold yellow]\n")
     else:
-        # Default behavior: Process ALL series from sitemap.json
         target_series = all_series
-        console.print(f"[bold cyan]>> Production Mode Active: Processing all {len(target_series)} series from catalog.[/bold cyan]\n")
+        console.print(f"[bold cyan]>> Production Mode Active: Processing all {len(target_series):,} series from catalog.[/bold cyan]\n")
 
-    # Stage 2: Series Metadata, Banners & Episodes
-    ready_folders = step_2_series_and_episodes(target_series, workers=args.series_workers)
-
-    # Stage 3: Streaming Servers
-    if not args.skip_servers:
-        step_3_servers(ready_folders, workers=2, server_workers=args.server_workers)
-    else:
-        console.print("[yellow]⚠️ Server extraction stage skipped per --skip-servers request.[/yellow]\n")
-
-    # Final summary display
-    display_summary(start_time)
+    # Run unified live pipeline
+    run_live_pipeline(
+        series_list=target_series,
+        skip_servers=args.skip_servers,
+        server_workers=args.server_workers
+    )
 
 
 if __name__ == "__main__":

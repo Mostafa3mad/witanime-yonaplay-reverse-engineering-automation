@@ -318,6 +318,7 @@ Launches the pipeline for all **2,620+** series across the site:
 4اسكربت تحميل من موقع drama_online_tv/
 │
 ├── pipeline.py                 # Master orchestrator script (Stages 1, 2, & 3)
+├── config.json                 # Global configuration (threads, timeouts, modes, paths)
 ├── sitemap.json                # Pre-scraped catalog index (2,620+ drama entries)
 ├── README.md                   # Complete architectural and technical documentation
 │
